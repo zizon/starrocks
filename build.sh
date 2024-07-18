@@ -551,6 +551,7 @@ if [ ${BUILD_BE} -eq 1 ]; then
     cp -p ${STARROCKS_THIRDPARTY}/installed/hadoop/share/hadoop/tools/lib/azure-* ${STARROCKS_OUTPUT}/be/lib/hadoop/hdfs
     cp -p ${STARROCKS_THIRDPARTY}/installed/gcs_connector/*.jar ${STARROCKS_OUTPUT}/be/lib/hadoop/hdfs
     cp -r -p ${STARROCKS_THIRDPARTY}/installed/hadoop/lib/native ${STARROCKS_OUTPUT}/be/lib/hadoop/
+    cp -r -p ${STARROCKS_THIRDPARTY}/installed/jindosdk/libjindosdk_c.so* ${STARROCKS_OUTPUT}/be/lib/hadoop/native/
 
     # remove log4j
     rm -f ${STARROCKS_OUTPUT}/be/lib/hadoop/common/lib/log4j-1.2.17.jar
