@@ -46,7 +46,7 @@ ASYNC_PROFILER_SOURCE="async-profiler-2.9-linux-x64"
 ASYNC_PROFILER_MD5SUM="29127cee36b7acf069d31603b4558361"
 
 # jindosdk for Aliyun OSS
-JINDOSDK_DOWNLOAD="https://jindodata-binary.oss-cn-shanghai.aliyuncs.com/release/6.5.0/jindosdk-6.5.0-linux.tar.gz"
+JINDOSDK_DOWNLOAD="https://cdn-thirdparty.starrocks.com/jindo/jindosdk-6.5.0-linux.tar.gz"
 JINDOSDK_NAME="jindosdk-6.5.0-linux.tar.gz"
 JINDOSDK_SOURCE="jindosdk-6.5.0-linux"
 JINDOSDK_MD5SUM="a82816763087d300d740b6c7ac7e1841"
