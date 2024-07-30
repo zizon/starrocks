@@ -22,7 +22,7 @@
 #####################################################
 
 # jindosdk for Aliyun OSS
-JINDOSDK_DOWNLOAD="https://jindodata-binary.oss-cn-shanghai.aliyuncs.com/release/6.5.0/jindosdk-6.5.0-linux-ubuntu22-x86_64.tar.gz"
+JINDOSDK_DOWNLOAD="https://cdn-thirdparty.starrocks.com/jindo/jindosdk-6.5.0-linux-ubuntu22-x86_64.tar.gz"
 JINDOSDK_NAME="jindosdk-6.5.0-linux-ubuntu22-x86_64.tar.gz"
 JINDOSDK_SOURCE="jindosdk-6.5.0-linux-ubuntu22-x86_64"
 JINDOSDK_MD5SUM="64ec94caf86fdcbe2fb04263ab10ec96"
