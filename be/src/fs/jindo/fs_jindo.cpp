@@ -616,8 +616,8 @@ private:
     std::optional<std::shared_ptr<internal::BucketHost>> from_provided(const std::string& bucket,
                                                                        const std::string& endpoint) const {
         auto option = default_option();
-        auto resolve = [&option](const std::vector<std::string> candiates) -> const std::string& {
-            for (auto& candiate : candiates) {
+        auto resolve = [&option](const std::vector<std::string>&& candidates) -> const std::string& {
+            for (auto& candiate : candidates) {
                 auto it = option.find(candiate);
                 if (it != option.end()) {
                     return it->second;
@@ -626,8 +626,8 @@ private:
 
             return internal::empty_string;
         };
-        auto& key = resolve({"fs.oss.accessKeyId", fmt::format("fs.oss.bucket.{}.accessKeyId", bucket)});
-        auto& secret = resolve({"fs.oss.accessKeySecret", fmt::format("fs.oss.bucket.{}.accessKeySecret", bucket)});
+        auto& key = resolve({fmt::format("fs.oss.bucket.{}.accessKeyId", bucket), "fs.oss.accessKeyId"});
+        auto& secret = resolve({fmt::format("fs.oss.bucket.{}.accessKeySecret", bucket), "fs.oss.accessKeySecret"});
 
         if (auto bucket = create_bucket(key, secret, endpoint, std::move(option))) {
             _cache.insert(endpoint, *bucket);
@@ -700,14 +700,6 @@ private:
                             }
                         }
 
-                        // copy all options ,but:
-                        // 1. fs.oss.accessKeyId
-                        // 2. fs.oss.accessKeySecret
-                        if (kv.first.compare("fs.oss.accessKeyId") == 0 ||
-                            kv.first.compare("fs.oss.accessKeySecret") == 0) {
-                            continue;
-                        }
-
                         option.emplace(kv);
                     }
                 }
@@ -716,7 +708,7 @@ private:
             }
         };
 
-        // 1. from core-site.xml
+        // from core-site.xml
         auto home_conf = fmt::format("{}/conf/core-site.xml", boost::compute::detail::getenv("STARROCKS_HOME"));
         if (fs::path_exist(home_conf)) {
             JINDO_LOG_INFO << "using static config:" << home_conf;
@@ -730,45 +722,6 @@ private:
                     load_from_core_site(conf);
                     break;
                 }
-            }
-        }
-
-        // 2. cloud configuration
-        auto apply_cloud_configuration = [&option](const starrocks::TCloudConfiguration* cloud_configuration) {
-            if (cloud_configuration->__isset.cloud_properties) {
-                for (auto& property : cloud_configuration->cloud_properties) {
-                    option.emplace(property.key, property.value);
-                }
-            }
-
-            if (cloud_configuration->__isset.cloud_properties_v2) {
-                for (auto& [key, value] : cloud_configuration->cloud_properties_v2) {
-                    option.emplace(key, value);
-                }
-            }
-        };
-
-        if (_fs_options.cloud_configuration != nullptr) {
-            apply_cloud_configuration(_fs_options.cloud_configuration);
-        }
-
-        // 3. hdfs properties
-        auto property = _fs_options.hdfs_properties();
-        if (property != nullptr) {
-            if (property->__isset.access_key) {
-                option.emplace("fs.oss.accessKeyId", property->access_key);
-            }
-
-            if (property->__isset.secret_key) {
-                option.emplace("fs.oss.accessKeySecret", property->secret_key);
-            }
-
-            if (property->__isset.cloud_configuration) {
-                apply_cloud_configuration(&property->cloud_configuration);
-            }
-
-            if (property->__isset.hdfs_username) {
-                option.emplace("jindo.user", property->hdfs_username);
             }
         }
 
