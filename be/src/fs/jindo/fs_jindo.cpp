@@ -588,8 +588,8 @@ private:
 
                 return strings::Split(user_info.to_string(), ":");
             }()) {
-            StringValue authority;
-            if (!UrlParser::parse_url(StringValue(path), UrlParser::AUTHORITY, &authority)) {
+            StringValue host;
+            if (!UrlParser::parse_url(StringValue(path), UrlParser::HOST, &host)) {
                 JINDO_LOG_WARN << "fail parse authority of " << path;
                 return std::nullopt;
             }
@@ -600,11 +600,11 @@ private:
                 return std::nullopt;
             }
 
-            auto endpoint = fmt::format("{}://{}", protocal.to_string(), authority.to_string());
+            auto endpoint = fmt::format("{}://{}", protocal.to_string(), host.to_string());
             if (auto bucket = create_bucket(user_info->first.c_str(), user_info->second.c_str(), endpoint,
                                             default_option())) {
                 _cache.insert(endpoint, *bucket);
-                JINDO_LOG_INFO << "resolve bucket for " << path << " using path encoded user info";
+                JINDO_LOG_INFO << "resolve bucket for " << endpoint << " using path encoded user info";
                 return bucket;
             }
         }
