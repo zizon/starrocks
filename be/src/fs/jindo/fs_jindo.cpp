@@ -22,7 +22,7 @@
 
 #include "boost/compute/detail/lru_cache.hpp"
 #include "common/config.h"
-#include "common/s3_uri.h"
+#include "fs/credential/cloud_configuration_factory.h"
 #include "fs/fs_util.h"
 #include "gutil/strings/split.h"
 #include "jindosdk/jdo_api.h"
@@ -51,6 +51,7 @@ class BucketHost {
 public:
     BucketHost(JdoOptions_t option = nullptr, JdoStore_t store = nullptr) : _store(store), _option(option) {}
 
+    // avoid double free and move issue
     DISALLOW_COPY(BucketHost);
 
     ~BucketHost() {
@@ -113,9 +114,9 @@ private:
     JdoOptions_t _option;
 };
 
-const Status not_implemented = Status::NotSupported("JindoFileSystem::NotImplemented");
 const std::shared_ptr<BucketHost> dummy_bucket = std::make_shared<BucketHost>();
 const std::string empty_string;
+const Status not_implemented = Status::NotSupported("JindoFileSystem::NotImplemented");
 
 } // namespace starrocks::jindo::internal
 
@@ -534,152 +535,253 @@ public:
     };
 
 protected:
-    std::shared_ptr<internal::BucketHost> resolve(const std::string& path) const {
-        S3URI parser;
-        if (!parser.parse(path)) {
-            JINDO_LOG_ERROR << "fail to parse path:" << path << " resolve to dummy bucket";
+    std::shared_ptr<internal::BucketHost> resolve(const std::string_view path) const {
+        // strip possible oss://
+        const std::string_view scheme_prefix = [&path]() -> std::string_view {
+            const std::string scheme_match = "://";
+            auto it = path.find(scheme_match);
+            if (it == std::string_view::npos) {
+                return internal::empty_string;
+            }
+
+            return path.substr(0, it + scheme_match.length());
+        }();
+
+        // strip keep host part of ${host}/path/to/file
+        const std::string_view host = [&path, &scheme_prefix]() {
+            std::string_view strip_scheme = path.substr(scheme_prefix.length());
+            auto it = strip_scheme.find('/');
+            if (it == std::string_view::npos) {
+                return strip_scheme;
+            }
+            return strip_scheme.substr(0, it);
+        }();
+
+        // possible {access_key}:{secret_key}@${host}
+        auto credential_end = host.find('@');
+        if (credential_end == std::string_view::npos) {
+            // use configs from options
+            return create_bucket(scheme_prefix, host);
+        }
+
+        // strip {access_key}:{secret_key}@${host}
+        if (credential_end + 1 >= host.length()) {
+            JINDO_LOG_ERROR << "empty bucket name found";
+            return internal::dummy_bucket;
+        }
+        auto credential = host.substr(0, credential_end);
+        auto strip_credential_host = host.substr(credential_end + 1);
+
+        // find user end
+        auto user_end = credential.find(':');
+        if (user_end == std::string_view::npos) {
+            JINDO_LOG_ERROR << "no user provided in path:" << strip_credential_host;
             return internal::dummy_bucket;
         }
 
-        auto endpoint = fmt::format("{}://{}.{}", parser.scheme(), parser.bucket(), parser.endpoint());
-
-        // try from cache
-        _cache_mutex.lock_shared();
-        if (auto cached = from_cache(endpoint)) {
-            _cache_mutex.unlock_shared();
-            return *cached;
+        if (user_end + 1 >= credential.length()) {
+            JINDO_LOG_ERROR << "bucket wihtout secret key:" << strip_credential_host;
+            return internal::dummy_bucket;
         }
-        _cache_mutex.unlock_shared();
 
-        _cache_mutex.lock();
-        auto bucekt = [&parser, &path, this, &endpoint]() {
-            if (auto cached = from_cache(endpoint)) {
-                return *cached;
-            }
-
-            if (auto pathed = from_path(path)) {
-                return *pathed;
-            } else if (auto provided = from_provided(parser.bucket(), endpoint)) {
-                return *provided;
-            } else {
-                return internal::dummy_bucket;
-            }
-        }();
-        _cache_mutex.unlock();
-        return bucekt;
+        // using configs with embedded credentail
+        return create_bucket(scheme_prefix, strip_credential_host, credential.substr(0, user_end),
+                             credential.substr(user_end + 1));
     }
 
-private:
-    std::optional<std::shared_ptr<internal::BucketHost>> from_cache(const std::string& endpoint) const {
-        auto it = _cache.get(endpoint);
-        if (it) {
-            return *it;
-        }
-        return std::nullopt;
+    std::shared_ptr<internal::BucketHost> create_bucket(const std::string_view scheme_prefix,
+                                                        const std::string_view host) const {
+        return create_bucket(scheme_prefix, host, "", "");
     }
 
-    std::optional<std::shared_ptr<internal::BucketHost>> from_path(const std::string& path) const {
-        if (auto user_info = [&path]() -> std::optional<std::pair<std::string, std::string>> {
-                StringValue user_info;
-                if (!UrlParser::parse_url(StringValue(path), UrlParser::USERINFO, &user_info)) {
-                    JINDO_LOG_WARN << "fail parse user info of " << path;
-                    return std::nullopt;
+    std::shared_ptr<internal::BucketHost> create_bucket(const std::string_view scheme_prefix,
+                                                        const std::string_view host, const std::string_view access_key,
+                                                        const std::string_view secret_key) const {
+        // lazy load from disk
+        std::map<std::string, std::string> _lazy_kv;
+        auto kv = [this, &_lazy_kv]() {
+            return [&_lazy_kv, this]() -> const std::map<std::string, std::string>& {
+                if (_lazy_kv.empty()) {
+                    _lazy_kv = default_options();
                 }
 
-                return strings::Split(user_info.to_string(), ":");
-            }()) {
-            StringValue host;
-            if (!UrlParser::parse_url(StringValue(path), UrlParser::HOST, &host)) {
-                JINDO_LOG_WARN << "fail parse authority of " << path;
-                return std::nullopt;
-            }
+                return _lazy_kv;
+            };
+        }();
 
-            StringValue protocal;
-            if (!UrlParser::parse_url(StringValue(path), UrlParser::PROTOCOL, &protocal)) {
-                JINDO_LOG_WARN << "fail parse protocol of " << path;
-                return std::nullopt;
-            }
-
-            auto endpoint = fmt::format("{}://{}", protocal.to_string(), host.to_string());
-            if (auto bucket = create_bucket(user_info->first.c_str(), user_info->second.c_str(), endpoint,
-                                            default_option())) {
-                _cache.insert(endpoint, *bucket);
-                JINDO_LOG_INFO << "resolve bucket for " << endpoint << " using path encoded user info";
-                return bucket;
-            }
-        }
-
-        JINDO_LOG_WARN << "fail to create bucekt by path:" << path;
-        return std::nullopt;
-    }
-
-    std::optional<std::shared_ptr<internal::BucketHost>> from_provided(const std::string& bucket,
-                                                                       const std::string& endpoint) const {
-        auto option = default_option();
-        auto resolve = [&option](const std::vector<std::string>&& candidates) -> const std::string& {
-            for (auto& candiate : candidates) {
-                auto it = option.find(candiate);
-                if (it != option.end()) {
+        // resolve from config
+        const auto config_resolver = [&kv, this](const std::vector<std::string> candidates) -> std::string_view {
+            for (auto& candidate : candidates) {
+                auto it = kv().find(candidate);
+                if (it != kv().end()) {
                     return it->second;
                 }
             }
 
             return internal::empty_string;
         };
-        auto& key = resolve({fmt::format("fs.oss.bucket.{}.accessKeyId", bucket), "fs.oss.accessKeyId"});
-        auto& secret = resolve({fmt::format("fs.oss.bucket.{}.accessKeySecret", bucket), "fs.oss.accessKeySecret"});
 
-        if (auto bucket = create_bucket(key, secret, endpoint, std::move(option))) {
-            _cache.insert(endpoint, *bucket);
-
-            JINDO_LOG_INFO << "resolve bucket for " << endpoint << " static configs";
-            return bucket;
-        }
-
-        JINDO_LOG_WARN << "fail to create from static config:" << endpoint;
-        return std::nullopt;
-    }
-
-    std::optional<std::shared_ptr<internal::BucketHost>> create_bucket(const std::string& key,
-                                                                       const std::string& secret,
-                                                                       const std::string& endpoint,
-                                                                       std::map<std::string, std::string>&& kv) const {
-        kv.emplace("fs.oss.accessKeyId", key);
-        kv.emplace("fs.oss.accessKeySecret", secret);
-        kv.emplace("fs.oss.endpoint", endpoint);
-        auto& user = [&kv]() -> const std::string& {
-            auto it = kv.find("jindo.user");
-            if (it == kv.end()) {
-                return config::jindo_user;
-            } else {
-                return it->second;
+        // parse bucekt and endpoint
+        auto bucket_and_endpoint = [&host, this, &config_resolver]() -> std::pair<std::string_view, std::string_view> {
+            auto it = host.find('.');
+            if (it != std::string_view::npos) {
+                if (it + 1 < host.length()) {
+                    return std::make_pair(host.substr(0, it), host.substr(it + 1));
+                }
             }
+
+            auto bucket = [it, &host]() -> std::string_view {
+                if (it != std::string_view::npos) {
+                    return host.substr(0, it);
+                }
+
+                return host;
+            }();
+
+            // pure bucket,resolve endpoint
+
+            // 1. from cloud configuration
+            if (_fs_options.cloud_configuration != nullptr) {
+                auto cloud_configuration = _fs_options.cloud_configuration;
+                if (cloud_configuration->__isset.cloud_properties_v2) {
+                    auto it = cloud_configuration->cloud_properties_v2.find(starrocks::AWS_S3_ENDPOINT);
+                    if (it != cloud_configuration->cloud_properties_v2.end()) {
+                        return std::make_pair(bucket, it->second);
+                    }
+                }
+            }
+
+            // 2. try from config
+            return std::make_pair(
+                    bucket, config_resolver({fmt::format("fs.oss.bucket.{}.endpoint", bucket), "fs.oss.endpoint"}));
         }();
-
-        auto option = jdo_createOptions();
-        for (auto& [key, value] : kv) {
-            jdo_setOption(option, key.c_str(), value.c_str());
+        if (bucket_and_endpoint.first.empty() || bucket_and_endpoint.second.empty()) {
+            JINDO_LOG_ERROR << "empty bucket for scheme:" << scheme_prefix;
+            return internal::dummy_bucket;
         }
 
-        // creaet store
-        auto store = jdo_createStore(option, endpoint.c_str());
-        auto ctx = jdo_createHandleCtx1(store);
-        auto error = jdo_getHandleCtxErrorCode(ctx);
-        jdo_init(ctx, user.c_str());
-        if (error != 0) {
-            JINDO_LOG_WARN << "fail to create store:" << endpoint << " reason:" << jdo_getHandleCtxErrorMsg(ctx);
+        // finalizde store url
+        const auto url = fmt::format("{}{}.{}", scheme_prefix, bucket_and_endpoint.first, bucket_and_endpoint.second);
+        {
+            // do cache lookup
+            _cache_mutex.lock_shared();
+            auto bucket = _cache.get(url);
+            _cache_mutex.unlock_shared();
+
+            // cache hit
+            if (bucket) {
+                return *bucket;
+            }
+        }
+
+        // wrap it for easier lock management
+        const auto build_bucket = [&access_key, &secret_key, &bucket_and_endpoint, this, &config_resolver, &kv,
+                                   &url]() {
+            // ensure credential
+            auto credentail = [&access_key, &secret_key, &bucket_and_endpoint, this,
+                               &config_resolver]() -> std::pair<std::string_view, std::string_view> {
+                if (!access_key.empty() && !secret_key.empty()) {
+                    return std::make_pair(access_key, secret_key);
+                }
+
+                // any of the ak/sk is empty
+
+                // 1. from cloud configuration
+                if (_fs_options.cloud_configuration != nullptr) {
+                    auto cloud_configuration = _fs_options.cloud_configuration;
+                    if (cloud_configuration->__isset.cloud_properties_v2) {
+                        // cloud_configuration seal aliyun credential in s3 style config, see
+                        //   1. com.starrocks.credential.aliyun.AliyunCloudConfiguration#toThrift
+                        //   2. com.starrocks.credential.aliyun.AliyunCloudCredential#toThrift
+                        // thus, to avoid ambiguous if the cloud_configuration do provides one
+                        auto access_key = cloud_configuration->cloud_properties_v2.find(starrocks::AWS_S3_ACCESS_KEY);
+                        auto secret_key = cloud_configuration->cloud_properties_v2.find(starrocks::AWS_S3_SECRET_KEY);
+                        if (access_key != cloud_configuration->cloud_properties_v2.end() &&
+                            secret_key != cloud_configuration->cloud_properties_v2.end()) {
+                            return std::make_pair(access_key->second, secret_key->second);
+                        }
+                    }
+                }
+
+                // 2. try from config
+                return std::make_pair(
+                        config_resolver({fmt::format("fs.oss.bucket.{}.accessKeyId", bucket_and_endpoint.first),
+                                         "fs.oss.accessKeyId"}),
+                        config_resolver({fmt::format("fs.oss.bucket.{}.accessKeySecret", bucket_and_endpoint.first),
+                                         "fs.oss.accessKeySecret"}));
+            }();
+            if (credentail.first.empty() || credentail.second.empty()) {
+                JINDO_LOG_ERROR << "invalid credentail for bucekt:" << bucket_and_endpoint.first << "."
+                                << bucket_and_endpoint.second;
+                return internal::dummy_bucket;
+            }
+
+            // create option
+            auto option = jdo_createOptions();
+            for (auto& [key, value] : kv()) {
+                jdo_setOption(option, key.c_str(), value.c_str());
+            }
+
+            // overwrite credential.
+            // the bucekt specified setting is most relevant in jindosdk.
+            // so to make the key config more predicable, overwrite it here.
+            const auto force_bucekt_config = [&option](std::string&& key, std::string&& value) {
+                jdo_setOption(option, key.c_str(), value.c_str());
+            };
+            force_bucekt_config(fmt::format("fs.oss.bucket.{}.accessKeyId", bucket_and_endpoint.first),
+                                std::string(credentail.first));
+            force_bucekt_config(fmt::format("fs.oss.bucket.{}.accessKeySecret", bucket_and_endpoint.first),
+                                std::string(credentail.second));
+            force_bucekt_config(fmt::format("fs.oss.bucket.{}.endpoint", bucket_and_endpoint.first),
+                                std::string(bucket_and_endpoint.second));
+
+            // creaet store
+            JINDO_LOG_INFO << "create store:" << url;
+            auto store = jdo_createStore(option, url.c_str());
+
+            // init store
+            auto user = [&config_resolver, &bucket_and_endpoint]() {
+                auto user = config_resolver(
+                        {fmt::format("fs.oss.bucket.{}.user", bucket_and_endpoint.first), "fs.oss.user"});
+                if (user.empty()) {
+                    return config::jindo_user;
+                }
+
+                return std::string(user);
+            }();
+            auto ctx = jdo_createHandleCtx1(store);
+            jdo_init(ctx, user.c_str());
+            if (jdo_getHandleCtxErrorCode(ctx) != 0) {
+                JINDO_LOG_ERROR << "fail to create store:" << url << " reason:" << jdo_getHandleCtxErrorMsg(ctx);
+                jdo_freeHandleCtx(ctx);
+                jdo_destroyStore(store);
+                jdo_freeStore(store);
+                jdo_freeOptions(option);
+                return internal::dummy_bucket;
+            }
             jdo_freeHandleCtx(ctx);
-            jdo_destroyStore(store);
-            jdo_freeStore(store);
-            jdo_freeOptions(option);
-            return std::nullopt;
-        }
-        jdo_freeHandleCtx(ctx);
 
-        return std::make_shared<internal::BucketHost>(option, store);
+            return std::make_shared<internal::BucketHost>(option, store);
+        };
+
+        // ok, build with lock held
+        _cache_mutex.lock();
+        auto bucket = [&build_bucket, this, &url]() {
+            auto it = _cache.get(url);
+            if (it) {
+                return *it;
+            }
+
+            auto bucket = build_bucket();
+            _cache.insert(url, bucket);
+            return bucket;
+        }();
+        _cache_mutex.unlock();
+
+        return bucket;
     }
 
-    std::map<std::string, std::string> default_option() const {
+    std::map<std::string, std::string> default_options() const {
         std::map<std::string, std::string> option;
 
         auto load_from_core_site = [&option](const std::string& path) {
@@ -715,8 +817,8 @@ private:
             load_from_core_site(home_conf);
         } else {
             // try from hadoop_confi_dir
-            for (auto candiate : strings::Split(boost::compute::detail::getenv("HADOOP_CONF_DIR"), ":")) {
-                auto conf = fmt::format("{}/core-site.xml", candiate.as_string());
+            for (auto candidate : strings::Split(boost::compute::detail::getenv("HADOOP_CONF_DIR"), ":")) {
+                auto conf = fmt::format("{}/core-site.xml", candidate.as_string());
                 if (fs::path_exist(conf)) {
                     JINDO_LOG_INFO << "using static config:" << conf;
                     load_from_core_site(conf);
@@ -725,9 +827,21 @@ private:
             }
         }
 
+        // from cloud configuration
+        if (_fs_options.cloud_configuration != nullptr) {
+            auto cloud_configuration = _fs_options.cloud_configuration;
+
+            if (cloud_configuration->__isset.cloud_properties_v2) {
+                for (auto& [key, value] : cloud_configuration->cloud_properties_v2) {
+                    option.emplace(key, value);
+                }
+            }
+        }
+
         return option;
     }
 
+private:
     StatusOr<std::unique_ptr<io::JindoInputStream>> new_input_stream(const std::string& path) const {
         auto bucket = resolve(path);
         auto maybe_io_context = bucket->map<JdoIOContext_t>([&path](auto ctx, auto store) {
