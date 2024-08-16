@@ -151,15 +151,28 @@ public:
             : JindoStream(bucket, path, io_context) {};
 
     Status seek(int64_t position) override {
-        return _bucket
-                ->map<int64_t>([position](auto ctx, auto store) { return jdo_seek(ctx, position, nullptr) > 0; },
-                               _io_ctx)
-                .status();
+        if (position < 0) {
+            return Status::InvalidArgument(fmt::format("Invalid offset {}", position));
+        }
+
+        // accept seek in >0 case even if it beyond eof.
+        // column reader and others have speicial assumption
+        _position = position;
+        auto status =
+                _bucket->map<int64_t>([position](auto ctx, auto store) { return jdo_seek(ctx, position, nullptr) > 0; },
+                                      _io_ctx)
+                        .status();
+        if (status.ok()) {
+            return Status::OK();
+        } else if (status.is_end_of_file()) {
+            JINDO_LOG_WARN << "seek path:" << _path << " to eof";
+            return Status::OK();
+        }
+
+        return status;
     };
 
-    StatusOr<int64_t> position() override {
-        return _bucket->map<int64_t>([](auto ctx, auto store) { return jdo_tell(ctx, nullptr); }, _io_ctx);
-    };
+    StatusOr<int64_t> position() override { return _position; };
 
     StatusOr<int64_t> get_size() override {
         return _bucket->map<int64_t>(
@@ -177,6 +190,9 @@ public:
                 [data, count](auto ctx, auto store) { return jdo_read(ctx, static_cast<char*>(data), count, nullptr); },
                 _io_ctx);
     };
+
+private:
+    int64_t _position = 0;
 };
 
 class JindoOutputStream : public starrocks::WritableFile, JindoStream {
