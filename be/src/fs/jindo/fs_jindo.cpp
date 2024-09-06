@@ -138,7 +138,7 @@ public:
 
 protected:
     JindoStream(std::shared_ptr<internal::BucketHost>& bucket, std::string_view path, JdoIOContext_t io_context)
-            : _bucket(bucket), _path(path), _io_ctx(io_context) {};
+            : _bucket(bucket), _path(path), _io_ctx(io_context){};
 
     std::shared_ptr<internal::BucketHost> _bucket;
     std::string _path;
@@ -148,7 +148,7 @@ protected:
 class JindoInputStream : public starrocks::io::SeekableInputStream, JindoStream {
 public:
     JindoInputStream(std::shared_ptr<internal::BucketHost>& bucket, std::string_view path, JdoIOContext_t io_context)
-            : JindoStream(bucket, path, io_context) {};
+            : JindoStream(bucket, path, io_context){};
 
     Status seek(int64_t position) override {
         if (position < 0) {
@@ -199,7 +199,7 @@ class JindoOutputStream : public starrocks::WritableFile, JindoStream {
 public:
     JindoOutputStream(std::shared_ptr<internal::BucketHost>& bucket, std::string_view path, JdoIOContext_t io_context,
                       uint64_t file_size)
-            : JindoStream(bucket, path, io_context), _file_size(file_size) {};
+            : JindoStream(bucket, path, io_context), _file_size(file_size){};
 
     Status append(const Slice& data) override {
         return _bucket
@@ -258,7 +258,7 @@ class JindoFileSystem : public FileSystem {
 public:
     Type type() const override { return JINDO; }
 
-    JindoFileSystem(const FSOptions& options) : _fs_options(options), _cache_mutex(), _cache(10) {};
+    JindoFileSystem(const FSOptions& options) : _fs_options(options), _cache_mutex(), _cache(10){};
 
     StatusOr<std::unique_ptr<SequentialFile>> new_sequential_file(const SequentialFileOptions& opts,
                                                                   const std::string& fname) override {
@@ -326,7 +326,7 @@ public:
         // grap current filesize
         auto io_ctx = maybe_io_context.value();
         auto maybe_file = bucket->map<JdoFileStatus_t>(
-                [this, &path](auto ctx, auto store) { return jdo_getFileStatus(ctx, path.c_str(), nullptr); }, io_ctx);
+                [&path](auto ctx, auto store) { return jdo_getFileStatus(ctx, path.c_str(), nullptr); }, io_ctx);
         if (!maybe_file.ok()) {
             jdo_freeIOContext(io_ctx);
             return maybe_file.status();
@@ -371,7 +371,7 @@ public:
 
     Status iterate_dir2(const std::string& dir, const std::function<bool(DirEntry)>& cb) override {
         auto maybe_list = resolve(dir)->map<JdoListDirResult_t>(
-                [&dir, &cb](auto ctx, auto store) { return jdo_listDir(ctx, dir.c_str(), false, nullptr); });
+                [&dir](auto ctx, auto store) { return jdo_listDir(ctx, dir.c_str(), false, nullptr); });
         if (!maybe_list.ok()) {
             return maybe_list.status();
         }
@@ -626,7 +626,7 @@ protected:
         }();
 
         // resolve from config
-        const auto config_resolver = [&kv, this](const std::vector<std::string> candidates) -> std::string_view {
+        const auto config_resolver = [&kv](const std::vector<std::string>& candidates) -> std::string_view {
             for (auto& candidate : candidates) {
                 auto it = kv().find(candidate);
                 if (it != kv().end()) {
@@ -659,9 +659,9 @@ protected:
             // 1. from cloud configuration
             if (_fs_options.cloud_configuration != nullptr) {
                 auto cloud_configuration = _fs_options.cloud_configuration;
-                if (cloud_configuration->__isset.cloud_properties_v2) {
-                    auto it = cloud_configuration->cloud_properties_v2.find(starrocks::AWS_S3_ENDPOINT);
-                    if (it != cloud_configuration->cloud_properties_v2.end()) {
+                if (cloud_configuration->__isset.cloud_properties) {
+                    auto it = cloud_configuration->cloud_properties.find(starrocks::AWS_S3_ENDPOINT);
+                    if (it != cloud_configuration->cloud_properties.end()) {
                         return std::make_pair(bucket, it->second);
                     }
                 }
@@ -705,15 +705,15 @@ protected:
                 // 1. from cloud configuration
                 if (_fs_options.cloud_configuration != nullptr) {
                     auto cloud_configuration = _fs_options.cloud_configuration;
-                    if (cloud_configuration->__isset.cloud_properties_v2) {
+                    if (cloud_configuration->__isset.cloud_properties) {
                         // cloud_configuration seal aliyun credential in s3 style config, see
                         //   1. com.starrocks.credential.aliyun.AliyunCloudConfiguration#toThrift
                         //   2. com.starrocks.credential.aliyun.AliyunCloudCredential#toThrift
                         // thus, to avoid ambiguous if the cloud_configuration do provides one
-                        auto access_key = cloud_configuration->cloud_properties_v2.find(starrocks::AWS_S3_ACCESS_KEY);
-                        auto secret_key = cloud_configuration->cloud_properties_v2.find(starrocks::AWS_S3_SECRET_KEY);
-                        if (access_key != cloud_configuration->cloud_properties_v2.end() &&
-                            secret_key != cloud_configuration->cloud_properties_v2.end()) {
+                        auto access_key = cloud_configuration->cloud_properties.find(starrocks::AWS_S3_ACCESS_KEY);
+                        auto secret_key = cloud_configuration->cloud_properties.find(starrocks::AWS_S3_SECRET_KEY);
+                        if (access_key != cloud_configuration->cloud_properties.end() &&
+                            secret_key != cloud_configuration->cloud_properties.end()) {
                             return std::make_pair(access_key->second, secret_key->second);
                         }
                     }
@@ -847,8 +847,8 @@ protected:
         if (_fs_options.cloud_configuration != nullptr) {
             auto cloud_configuration = _fs_options.cloud_configuration;
 
-            if (cloud_configuration->__isset.cloud_properties_v2) {
-                for (auto& [key, value] : cloud_configuration->cloud_properties_v2) {
+            if (cloud_configuration->__isset.cloud_properties) {
+                for (auto& [key, value] : cloud_configuration->cloud_properties) {
                     option.emplace(key, value);
                 }
             }
